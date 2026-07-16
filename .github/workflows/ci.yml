@@ -1,38 +1,75 @@
 # ============================================================
-# Workflow CI: tự động chạy test mỗi lần push / tạo PR
+# Pipeline CI/CD hoàn chỉnh: Test → Build & Push image → Deploy
 # ============================================================
-name: CI - Test
+name: CI/CD Pipeline
 
-# ---- Trigger: khi nào workflow chạy ----
 on:
   push:
-    branches: [ main ] # push lên main
+    branches: [ main ]
   pull_request:
-    branches: [ main ] # hoặc mở PR nhắm vào main
+    branches: [ main ]
+
+# Biến dùng chung cho toàn workflow
+env:
+  REGISTRY: ghcr.io # GitHub Container Registry
+  IMAGE_NAME: ${{ github.repository }} # = <username>/lap4
 
 jobs:
+  # ================= JOB 1: TEST (CI) =================
   test:
-    runs-on: ubuntu-latest # máy ảo Ubuntu do GitHub cấp, miễn phí
+    runs-on: ubuntu-latest
     steps:
-      # Bước 1: tải code của repo về runner.
-      # Runner là máy trắng — không checkout thì không có code để test!
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Bước 2: cài Python bằng action chính thức
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip" # cache thư mục pip → lần chạy sau nhanh hơn
-
-      # Bước 3: cài thư viện của project
+          cache: "pip"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      # Bước 4: chạy test — nếu bất kỳ test nào fail,
-      # step này fail → job fail → commit bị đánh dấu ❌
-      - name: Run tests with pytest
+      - name: Run tests
         run: pytest -v
+
+  # ============ JOB 2: BUILD & PUSH IMAGE (CD) ============
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: test # CHỈ chạy khi job test đã PASS
+    # Chỉ build khi push lên main (không build cho PR):
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    # Cấp quyền cho GITHUB_TOKEN (token tự sinh cho mỗi lần chạy):
+    permissions:
+      contents: read # đọc code
+      packages: write # ghi (push) image lên GHCR
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Đăng nhập GHCR — không cần tạo secret thủ công,
+      # GITHUB_TOKEN được GitHub cấp sẵn cho mỗi workflow run
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }} # user đang chạy workflow
+          password: ${{ secrets.GITHUB_TOKEN }} # token tự động, an toàn
+          
+      # Sinh tag/label chuẩn cho image (latest + mã commit)
+      - name: Extract metadata (tags, labels)
+        id: meta # đặt id để step sau tham chiếu
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha # tag theo commit SHA
+            
+      # Build image từ Dockerfile và push lên GHCR trong 1 bước
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: . # build context = gốc repo
+          push: true # push sau khi build xong
+          tags: ${{ steps.meta.outputs.tags }} # lấy output từ step "meta"
+          labels: ${{ steps.meta.outputs.labels }}
